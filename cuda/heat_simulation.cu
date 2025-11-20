@@ -95,26 +95,24 @@ __global__ void simulate_diffusion(float * grid, float * new_grid, int grid_size
 
 // TO-DO: debug
 __global__ void reduce_grid(float * grid, float * partial, int n) {
-    if (blockIdx.x == 0) {
-        printf("(device) reduce_grid is running at block %d %d\n", blockIdx.x, blockIdx.y);
-        printf("(device) reduce_grid is running at thread %d %d\n", threadIdx.x, threadIdx.y);
-    }
+    // printf("(device) reduce_grid is running at block %d %d\n", blockIdx.x, blockIdx.y);
+    // printf("(device) reduce_grid is running at thread %d %d\n", threadIdx.x, threadIdx.y);
     extern __shared__ float shmem[];
     float *d_shared_grid = shmem;
     
     unsigned int tid = blockIdx.x * blockDim.x + threadIdx.x; 
     d_shared_grid[threadIdx.x] = (tid < n ? grid[tid] : 0.0f); 
-    if (blockIdx.x == 2 and blockIdx.y == 0 and threadIdx.x == 0 and threadIdx.y == 0) printf("(device) My tid is %d\n", tid);
+    // if (blockIdx.x == 2 and blockIdx.y == 0 and threadIdx.x == 0 and threadIdx.y == 0) printf("(device) My tid is %d\n", tid);
+    
     __syncthreads(); 
     for (unsigned int s = blockDim.x /2; s > 0; s >>= 1) {
         if (threadIdx.x < s) d_shared_grid[threadIdx.x] += d_shared_grid[threadIdx.x + s]; 
         __syncthreads(); 
     }
-    if (blockIdx.x == 2 and blockIdx.y == 3 and threadIdx.x == 0 and threadIdx.y == 0) printf("(device) Any problems here?\n");
-    if (threadIdx.x == 0) {
+    // if (blockIdx.x == 2 and blockIdx.y == 3 and threadIdx.x == 0 and threadIdx.y == 0) printf("(device) Any problems here?\n");
+    if (threadIdx.x == 1 and threadIdx.y == 1) {
         partial[blockIdx.x] = d_shared_grid[0]; 
-        printf("(device) Im blockIdx = %d\n", blockIdx.x); 
-        printf("(device) Total accumulated inside block: %f\n", partial[blockIdx.x]);
+        printf("(device) Total accumulated inside block %d %d %d %d: %f\n", blockIdx.x, blockIdx.y, threadIdx.x, threadIdx.y, partial[blockIdx.x]); 
     }
 }
 
@@ -126,9 +124,9 @@ void initialize_grid(int N, int cuda_block_size) {
     grid_size = N;
     
     assert(cuda_block_size % 32 == 0); // TO-DO: check if this assumption is correct
-    h_blockDim = dim3(TILE, CEIL_DIV(cuda_block_size, TILE)); // TO-DO: check if z coord is TILE or 1
+    h_blockDim = dim3(TILE, CEIL_DIV(cuda_block_size, TILE)); 
     h_gridDim = dim3(CEIL_DIV(grid_size, h_blockDim.x), CEIL_DIV(grid_size, h_blockDim.y));
-    bytesShared = sizeof(float) * (h_blockDim.x +2) * (h_blockDim.y +2) * 2; // 2 because we have 2 shared grids
+    bytesShared = sizeof(float) * (h_blockDim.x +2) * (h_blockDim.y +2) * 2; // *2 because we have 2 shared grids
 
     size_t totalBytes = sizeof(float) * grid_size * grid_size;
     cudaMalloc(&grid, totalBytes);
@@ -142,50 +140,54 @@ void initialize_grid(int N, int cuda_block_size) {
 }
 
 void update_simulation() {
-    // calls kernels, reduces grid, and checks if end of simulation
+    // calls kernels, reduces grid, and checks if end of simulation ////////////////////////////////////////////////////////
     CUDA_CHECK(cudaGetLastError());
 
-    // calculate the diffusion using shared GPU memory
+    // calculate the diffusion using shared GPU memory ////////////////////////////////////////////////////////
     simulate_diffusion<<<h_gridDim, h_blockDim, bytesShared>>>(grid, new_grid, grid_size, diffusion_rate);
     CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
     swap(grid, new_grid);
     printf("(host) End of simulate_diffusion\n");
     
-    // apply heat sources in global GPU memory
+    // apply heat sources in global GPU memory ////////////////////////////////////////////////////////
     heat_sources<<<1, 1>>>(grid, grid_size);
     CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
     printf("(host) End of heat_sources\n");
-    
-    // print accumulated value of all the grid
-    // float sum = 0.0f;
-    // for (int i = 0; i < grid_size; i++) {
-    //     for (int j = 0; j < grid_size; j++) {
-    //         sum += grid[i*grid_size + j]; // Getting "Violacion de segmento" when uncommenting this line. 
-    //     }
-    // }
-    // printf("(device) Sum of the grid: %f\n", sum);
 
     // TO-DO: fix reduction 
-    // reduce grids using kernels 
-    // size_t totalBlocks = (h_gridDim.x * h_gridDim.y); 
-    // cudaMalloc(&partial, totalBlocks * sizeof(float)); 
-    // cudaMemset(partial, 0, totalBlocks * sizeof(float)); 
-
-    // printf("(host) totalBlocks = %d\n", totalBlocks);
-    // printf("(host) first element of partial = %d\n", partial[0]);
-
-    // reduce_grid<<<h_gridDim, h_blockDim, bytesShared>>>(grid, partial, grid_size * grid_size);
-    // CUDA_CHECK(cudaGetLastError());
+    // reduce in device using kernel ////////////////////////////////////////////////////////
+    size_t totalBlocks = (h_gridDim.x * h_gridDim.y); 
+    cudaMemset(new_grid, 0, totalBlocks * sizeof(float)); // using new_grid as reduction vector 
+    CUDA_CHECK(cudaGetLastError());
     
+    reduce_grid<<<h_gridDim, h_blockDim, bytesShared>>>(grid, new_grid, grid_size * grid_size);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
     
-    // // acumulate in host 
-    // float * h_partial = (float *)calloc(totalBlocks, sizeof(float));
-    // cudaMemcpy(h_partial, partial, totalBlocks * sizeof(float), cudaMemcpyDeviceToHost); 
-
-    // float tot = 0;
-    // for (int i = 0; i < totalBlocks; i++) tot += h_partial[i]; 
-    // printf("(host) Total accumulated: %d\n", tot);
+    // reduce in host ////////////////////////////////////////////////////////
+    float * h_partial = (float *)calloc(totalBlocks, sizeof(float));
+    cudaMemcpy(h_partial, new_grid, totalBlocks * sizeof(float), cudaMemcpyDeviceToHost); 
+    
+    float tot = 0;
+    for (int i = 0; i < totalBlocks; i++) tot += h_partial[i]; 
+    
+    // compare with host-reduced grid  ////////////////////////////////////////////////////////
+    float * h_grid = (float *)calloc(grid_size * grid_size, sizeof(float));
+    cudaMemcpy(h_grid, grid, grid_size * grid_size * sizeof(float), cudaMemcpyDeviceToHost); 
+    float sum = 0.0f;
+    for (int i = 0; i < grid_size; i++) {
+        for (int j = 0; j < grid_size; j++) {
+            sum += h_grid[i*grid_size + j]; 
+        }
+    }
+    printf("(host) Total accumulated in host: %f\n", sum);
+    
+    printf("(host) h_gridDim %d %d\n", h_gridDim.x, h_gridDim.y);
+    printf("(host) h_blockDim %d %d %d\n", h_blockDim.x, h_blockDim.y, h_blockDim.z);
+    printf("(host) totalBlocks = %d\n", totalBlocks);
+    printf("(host) Total accumulated via reduce_grid() kernel: %d\n", tot);
 }
 
 void destroy_grid() {
