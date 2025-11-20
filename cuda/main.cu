@@ -1,7 +1,8 @@
-#include <GL/freeglut.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include "heat_simulation.h"
+#ifdef GLUT
+#include <GL/freeglut.h>
+#endif
 
 #define WIDTH 640
 #define HEIGHT 480
@@ -12,6 +13,33 @@ float offsetY = 0.0f;
 
 unsigned int ms = 30; // milisegundos - equivale a Frames por Segundo -> FPSs= 1000/ (milisegundos por frame) -> 30ms son 33 FPS, 100ms son 10FPS
 
+/* 
+   Para medir el tiempo transcurrido (elapsed time):
+
+   resnfo: tipo de dato definido para abstraer la métrica de recursos a usar
+   timenfo: tipo de dato definido para abstraer la métrica de tiempo a usar
+
+   timestamp: abstrae función usada para tomar las muestras del tiempo transcurrido
+
+   printtime: abstrae función usada para imprimir el tiempo transcurrido
+
+   void myElapsedtime(resnfo start, resnfo end, timenfo *t): función para obtener 
+   el tiempo transcurrido entre dos medidas
+*/
+
+#include <sys/time.h>
+// #include <sys/resource.h>
+
+double dwalltime(){
+    double sec;
+    struct timeval tv;
+
+    gettimeofday(&tv,NULL);
+    sec = tv.tv_sec + tv.tv_usec/1000000.0;
+    return sec;
+}
+
+#ifdef GLUT
 float clamp(float val, float min, float max) {
     if (val < min) return min;
     if (val > max) return max;
@@ -89,7 +117,7 @@ void reshape(int w, int h){
 
 void keyboardKeys(unsigned char key, int x, int y){
     if (key == 27) { //ESC
-        destroy__grid();
+        destroy_grid();
         exit(0);
     }
 }
@@ -133,34 +161,27 @@ void mouseWheel(int wheel, int direction, int x, int y){
     updateProjection(WIDTH, HEIGHT);
     glutPostRedisplay();
 }
-
+#endif
 
 int main(int argc, char* argv[]) {
-    glutInit(&argc, argv);
-    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB);
-    glutInitWindowSize(WIDTH, HEIGHT);
-    glutCreateWindow("Simulaci�n de Calor 2D (Modelo separado) - CUDA");
     
-    int N = 512;
+    int N = 32;
     int cuda_block_size = 16;
-
+    
     if (argc > 1) N = atoi(argv[1]);
     if (argc > 2) cuda_block_size = atoi(argv[2]);
-
+    
+    double timetick = dwalltime();
     initialize_grid(N, cuda_block_size);
+    printf("(host) Tiempo de inicializacion de la grilla %f\n", dwalltime() - timetick);
+    for (int i = 0; i < 1; i++) {
+        update_simulation();
+    }
+    #ifdef GLUT
+        (ms, timer, 0); // Llama a timer (el paso de simulacion) cada ms milisegundos - FPSs= 1000/ (milisegundos por frame)
+    #endif
+    destroy_grid();    
+    printf("(host) Tiempo de ejecucion total %f\n", dwalltime() - timetick);
 
-    glutDisplayFunc(display);
-    glutReshapeFunc(reshape);
-    glutSpecialFunc(specialKeys);
-    glutKeyboardFunc(keyboardKeys);
-    glutMouseWheelFunc(mouseWheel);
-
-    glutTimerFunc(ms, timer, 0); //Llama a timer (el paso de simulacion) cada ms milisegundos - FPSs= 1000/ (milisegundos por frame)
-
-    glPointSize(1.0f);
-
-    glutMainLoop();
-
-    destroy__grid();
     return 0;
 }

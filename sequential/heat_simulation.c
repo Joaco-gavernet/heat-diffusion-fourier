@@ -34,7 +34,7 @@ void initialize_grid(int N) {
 }
 
 void update_simulation() {
-float sum;
+    float sum;
     for (int y = 1; y < grid_size - 1; y++) {
         for (int x = 1; x < grid_size - 1; x++) {
             sum = grid[(y - 1)*grid_size + x] + grid[(y + 1)*grid_size + x] +

@@ -1,59 +1,196 @@
-#include <stdlib.h>
 #include "heat_simulation.h"
+#include <algorithm>
 
-float* new_grid;
+using namespace std;
 
+#define TILE 32
+#define CEIL_DIV(a,b) (((a) + (b) - 1) / (b))
+
+dim3 h_blockDim, h_gridDim;
+size_t bytesShared; 
 float diffusion_rate = 0.25f;
 
 float *grid = NULL;
+float *new_grid = NULL;
+float *partial = NULL;
 int grid_size = 0;
 
-void mantener_fuentes_de_calor(float* _grid){
+#define CUDA_CHECK(x) do {                                \
+    cudaError_t err = (x);                                \
+    if (err != cudaSuccess) {                             \
+        fprintf(stderr, "CUDA error %s at %s:%d\n",       \
+            cudaGetErrorString(err), __FILE__, __LINE__); \
+        exit(1);                                          \
+    }                                                     \
+} while (0)
+
+// Kernels (device) //////////////////////////////////////////////////
+// TO-DO: understand why __global__ and not __device__
+__global__ void heat_sources(float * grid, int grid_size) {
+    printf("(device) heat_sources\n");
     int cx = grid_size / 2;
     int cy = grid_size / 2;
 
-    _grid[cy*grid_size+cx] = 100.0f;
+    grid[cy * grid_size + cx] = 100.0f;
 
     int offset = 20;
-    _grid[(cy+offset)*grid_size + (cx+offset)] = 100.0f;
-    _grid[(cy+offset)*grid_size + (cx-offset)] = 100.0f;
-    _grid[(cy-offset)*grid_size + (cx+offset)] = 100.0f;
-    _grid[(cy-offset)*grid_size + (cx-offset)] = 100.0f;
+    grid[(cy + offset) * grid_size + (cx + offset)] = 100.0f;
+    grid[(cy + offset) * grid_size + (cx - offset)] = 100.0f;
+    grid[(cy - offset) * grid_size + (cx + offset)] = 100.0f;
+    grid[(cy - offset) * grid_size + (cx - offset)] = 100.0f;
 }
 
-void initialize_grid(int N, int cuda_block_size) {
-    grid_size = N;
-    grid = (float*)malloc(sizeof(float)*grid_size*grid_size);
-    for (int i = 0; i < grid_size*grid_size; i++) {
-        grid[i] = 0.0f;
+__global__ void simulate_diffusion(float * grid, float * new_grid, int grid_size, float diffusion_rate) {
+    if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 1 && threadIdx.y == 1) printf("(device) simulate_diffusion\n");
+    extern __shared__ float shmem[];
+    float *d_shared_grid = shmem;
+    float *d_shared_grid_new = shmem + (blockDim.x +2) * (blockDim.y +2); // TO-DO: check if +2 is ok 
+    
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 1 && threadIdx.y == 1) printf("(device) my coords are %d, %d\n", x, y);    
+    if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 1 && threadIdx.y == 1) printf("(device) the grid_size is %d\n", grid_size);    
+    
+    // TO-DO: check if logic is ok to avoid processing borders, but still syncing with the rest of threads
+    if (x == 0 || x >= grid_size-1 || y == 0 || y >= grid_size-1) {
+        d_shared_grid[threadIdx.y *blockDim.x + threadIdx.x] = grid[y*grid_size + x]; // bordes sin cambiar
+        __syncthreads();
+        __syncthreads();
+        return;
     }
+    
+    // 1) Acceder coalescentemente a la memmoria global trayendo datos a memoria compartida
+    if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 1 && threadIdx.y == 1) printf("(device) coalescent access\n");
+    
+    const int strideY = blockDim.x + 2; // TO-DO: check why +3 and not +2
+    const int localX = threadIdx.x + 1;
+    const int localY = threadIdx.y + 1;
 
-    new_grid = (float*)malloc(sizeof(float)*grid_size*grid_size);
-    mantener_fuentes_de_calor(grid);
+    d_shared_grid[localY * strideY + localX] = grid[y*grid_size + x];
+    if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 1 && threadIdx.y == 1) printf("(device) my value is %f\n", d_shared_grid[threadIdx.y *blockDim.x + threadIdx.x]);
+    if (threadIdx.y == 0) d_shared_grid[localX] = grid[(y -1)*grid_size + x];
+    if (threadIdx.y == blockDim.y - 1) d_shared_grid[(blockDim.y + 1) * strideY + localX] = grid[(y +1)*grid_size + x];
+    if (threadIdx.x == 0) d_shared_grid[localY * strideY] = grid[y*grid_size + x - 1];
+    if (threadIdx.x == blockDim.x - 1) d_shared_grid[localY * strideY + (blockDim.x + 1)] = grid[y*grid_size + x + 1];
+
+    __syncthreads();
+    if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 1 && threadIdx.y == 1) printf("(device) sync 1\n");
+    
+    // 2) Procesamiento sobre memoria compartida
+    float center = d_shared_grid[localY * strideY + localX];
+
+    // TO-DO: check how to access elements out of the shared memory
+    float up = d_shared_grid[(localY - 1) * strideY + localX];
+    float down = d_shared_grid[(localY + 1) * strideY + localX];
+    float left = d_shared_grid[localY * strideY + (localX - 1)];
+    float right = d_shared_grid[localY * strideY + (localX + 1)];
+    d_shared_grid_new[localY *strideY + localX] = center + diffusion_rate * (up + down + left + right - 4.0f * center);
+    
+    __syncthreads();
+    if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 1 && threadIdx.y == 1) printf("(device) sync 2\n");
+    
+    // 3) Acceder coalescentemente a la memoria global escribiendo resultados
+    new_grid[y*grid_size + x] = d_shared_grid_new[threadIdx.y * blockDim.x + threadIdx.x];
+}
+
+// TO-DO: debug
+__global__ void reduce_grid(float * grid, float * partial, int n) {
+    if (blockIdx.x == 0) {
+        printf("(device) reduce_grid is running at block %d %d\n", blockIdx.x, blockIdx.y);
+        printf("(device) reduce_grid is running at thread %d %d\n", threadIdx.x, threadIdx.y);
+    }
+    extern __shared__ float shmem[];
+    float *d_shared_grid = shmem;
+    
+    unsigned int tid = blockIdx.x * blockDim.x + threadIdx.x; 
+    d_shared_grid[threadIdx.x] = (tid < n ? grid[tid] : 0.0f); 
+    if (blockIdx.x == 2 and blockIdx.y == 0 and threadIdx.x == 0 and threadIdx.y == 0) printf("(device) My tid is %d\n", tid);
+    __syncthreads(); 
+    for (unsigned int s = blockDim.x /2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) d_shared_grid[threadIdx.x] += d_shared_grid[threadIdx.x + s]; 
+        __syncthreads(); 
+    }
+    if (blockIdx.x == 2 and blockIdx.y == 3 and threadIdx.x == 0 and threadIdx.y == 0) printf("(device) Any problems here?\n");
+    if (threadIdx.x == 0) {
+        partial[blockIdx.x] = d_shared_grid[0]; 
+        printf("(device) Im blockIdx = %d\n", blockIdx.x); 
+        printf("(device) Total accumulated inside block: %f\n", partial[blockIdx.x]);
+    }
+}
+
+
+// General functions (host)  //////////////////////////////////////////////////
+void initialize_grid(int N, int cuda_block_size) {
+    // TO-DO: cudaGetDeviceProperties() and checkparams(N, cuda_block_size);
+
+    grid_size = N;
+    
+    assert(cuda_block_size % 32 == 0); // TO-DO: check if this assumption is correct
+    h_blockDim = dim3(TILE, CEIL_DIV(cuda_block_size, TILE)); // TO-DO: check if z coord is TILE or 1
+    h_gridDim = dim3(CEIL_DIV(grid_size, h_blockDim.x), CEIL_DIV(grid_size, h_blockDim.y));
+    bytesShared = sizeof(float) * (h_blockDim.x +2) * (h_blockDim.y +2) * 2; // 2 because we have 2 shared grids
+
+    size_t totalBytes = sizeof(float) * grid_size * grid_size;
+    cudaMalloc(&grid, totalBytes);
+    cudaMalloc(&new_grid, totalBytes);
+    cudaMemset(grid, 0, totalBytes);
+    cudaMemset(new_grid, 0, totalBytes);
+
+    // apply heat sources in global GPU memory
+    heat_sources<<<1, 1>>>(grid, grid_size);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 void update_simulation() {
-float sum;
-    for (int y = 1; y < grid_size - 1; y++) {
-        for (int x = 1; x < grid_size - 1; x++) {
-            sum = grid[(y - 1)*grid_size + x] + grid[(y + 1)*grid_size + x] +
-                        grid[y*grid_size + (x - 1)] + grid[y*grid_size + (x + 1)];
-            new_grid[y*grid_size + x] = grid[y*grid_size + x] + diffusion_rate * (sum - 4 * grid[y*grid_size + x]);
-        }
-    }
+    // calls kernels, reduces grid, and checks if end of simulation
+    CUDA_CHECK(cudaGetLastError());
 
-    mantener_fuentes_de_calor(new_grid);
+    // calculate the diffusion using shared GPU memory
+    simulate_diffusion<<<h_gridDim, h_blockDim, bytesShared>>>(grid, new_grid, grid_size, diffusion_rate);
+    CUDA_CHECK(cudaGetLastError());
+    swap(grid, new_grid);
+    printf("(host) End of simulate_diffusion\n");
+    
+    // apply heat sources in global GPU memory
+    heat_sources<<<1, 1>>>(grid, grid_size);
+    CUDA_CHECK(cudaGetLastError());
+    printf("(host) End of heat_sources\n");
+    
+    // print accumulated value of all the grid
+    // float sum = 0.0f;
+    // for (int i = 0; i < grid_size; i++) {
+    //     for (int j = 0; j < grid_size; j++) {
+    //         sum += grid[i*grid_size + j]; // Getting "Violacion de segmento" when uncommenting this line. 
+    //     }
+    // }
+    // printf("(device) Sum of the grid: %f\n", sum);
 
-    for (int y = 1; y < grid_size - 1; y++) {
-        for (int x = 1; x < grid_size - 1; x++) {
-            grid[y*grid_size + x] = new_grid[y*grid_size + x];
-        }
-    }
+    // TO-DO: fix reduction 
+    // reduce grids using kernels 
+    // size_t totalBlocks = (h_gridDim.x * h_gridDim.y); 
+    // cudaMalloc(&partial, totalBlocks * sizeof(float)); 
+    // cudaMemset(partial, 0, totalBlocks * sizeof(float)); 
+
+    // printf("(host) totalBlocks = %d\n", totalBlocks);
+    // printf("(host) first element of partial = %d\n", partial[0]);
+
+    // reduce_grid<<<h_gridDim, h_blockDim, bytesShared>>>(grid, partial, grid_size * grid_size);
+    // CUDA_CHECK(cudaGetLastError());
+    
+    CUDA_CHECK(cudaDeviceSynchronize());
+    
+    // // acumulate in host 
+    // float * h_partial = (float *)calloc(totalBlocks, sizeof(float));
+    // cudaMemcpy(h_partial, partial, totalBlocks * sizeof(float), cudaMemcpyDeviceToHost); 
+
+    // float tot = 0;
+    // for (int i = 0; i < totalBlocks; i++) tot += h_partial[i]; 
+    // printf("(host) Total accumulated: %d\n", tot);
 }
 
-void destroy__grid(){
-    free(grid);
+void destroy_grid() {
+    cudaFree(grid);
+    cudaFree(new_grid);
     grid = NULL;
     grid_size = 0;
-    free(new_grid);
 }

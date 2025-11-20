@@ -1,13 +1,14 @@
 #ifndef HEAT_SIMULATION_H
 #define HEAT_SIMULATION_H
 
-extern float* grid;
-extern int grid_size;
+#include <cuda_runtime.h>
+#include <stdlib.h>
+#include <assert.h>   // o <cassert>
+#include <stdio.h>    // para printf
 
-void initialize_grid(int N);
+void initialize_grid(int N, int cuda_block_size);
 void update_simulation();
-void mantener_fuentes_de_calor(float* _grid);
-void destroy__grid();
+void destroy_grid();
 
 #endif
 
