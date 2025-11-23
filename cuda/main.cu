@@ -167,21 +167,34 @@ int main(int argc, char* argv[]) {
     
     int N = 32;
     int cuda_block_size = 16;
+    int max_steps = 100;
     
     if (argc > 1) N = atoi(argv[1]);
     if (argc > 2) cuda_block_size = atoi(argv[2]);
+
+    printf("(host) Parametros de simulacion: \n");
+    printf("(host) N = %d\n", N);
+    printf("(host) cuda_block_size = %d\n", cuda_block_size);
+    printf("(host) max_steps = %d\n", max_steps);
+    printf("(host) //////////////////////////////////\n");
     
-    double timetick = dwalltime();
+    double timeini = dwalltime();
     initialize_grid(N, cuda_block_size);
-    printf("(host) Tiempo de inicializacion de la grilla %f\n", dwalltime() - timetick);
-    for (int i = 0; i < 1; i++) {
+    printf("(host) Tiempo de inicializacion de la grilla %f s\n", dwalltime() - timeini);
+    
+    double timesim = dwalltime(); 
+    for (int i = 0; i < max_steps; i++) {
         update_simulation();
     }
     #ifdef GLUT
-        (ms, timer, 0); // Llama a timer (el paso de simulacion) cada ms milisegundos - FPSs= 1000/ (milisegundos por frame)
+    (ms, timer, 0); // Llama a timer (el paso de simulacion) cada ms milisegundos - FPSs= 1000/ (milisegundos por frame)
     #endif
     destroy_grid();    
-    printf("(host) Tiempo de ejecucion total %f\n", dwalltime() - timetick);
+    float total_time = dwalltime() - timeini; 
+    float sim_time = dwalltime() - timesim;
+    printf("(host) Tiempo de simulacion %f s\n", sim_time);
+    printf("(host) Tiempo total (inicializacion y simulacion) %f s\n", total_time);
+    printf("(host) Tiempo promedio de paso de simulacion %f s\n", sim_time /max_steps);
 
     return 0;
 }
