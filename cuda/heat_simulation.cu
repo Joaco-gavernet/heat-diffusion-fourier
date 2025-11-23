@@ -94,38 +94,23 @@ __global__ void simulate_diffusion(float * grid, float * new_grid, int grid_size
     new_grid[y*grid_size + x] = d_shared_grid_new[localY *strideY + localX];
 }
 
-__global__ void reduce_grid(const float * grid, float * partial, int n) {
+__global__ void reduce_grid(float * grid, float * partial, int n) {
     extern __shared__ float d_shared_grid[];
-
+    
     const unsigned int threads_per_block = blockDim.x * blockDim.y;
     const unsigned int local_id = threadIdx.y * blockDim.x + threadIdx.x;
     const unsigned int block_id = blockIdx.y * gridDim.x + blockIdx.x;
+    const unsigned int global_id = block_id * threads_per_block + local_id;
 
-    // First upload: each thread pulls two contiguous elements to cut the first
-    // reduction step and keep all lanes busy.
-    unsigned int idx = block_id * (threads_per_block << 1) + local_id;
-    float sum = 0.0f;
-    if (idx < static_cast<unsigned int>(n)) sum = grid[idx];
-    idx += threads_per_block;
-    if (idx < static_cast<unsigned int>(n)) sum += grid[idx];
-    d_shared_grid[local_id] = sum;
+    d_shared_grid[local_id] = (global_id < n) ? grid[global_id] : 0.0f;
     __syncthreads();
 
-    // Block reduction until one warp remains.
-    for (unsigned int s = threads_per_block >> 1; s > 32; s >>= 1) {
+    for (unsigned int s = threads_per_block >> 1; s > 0; s >>= 1) {
         if (local_id < s) d_shared_grid[local_id] += d_shared_grid[local_id + s];
         __syncthreads();
     }
-
-    // Final warp-level reduction with shuffles to avoid extra divergence/syncs.
-    if (local_id < 32) {
-        float val = d_shared_grid[local_id];
-        if (threads_per_block >= 64 && local_id + 32 < threads_per_block) val += d_shared_grid[local_id + 32];
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            val += __shfl_down_sync(0xffffffff, val, offset);
-        }
-        if (local_id == 0) partial[block_id] = val;
-    }
+    
+    if (local_id == 0) partial[block_id] = d_shared_grid[0];
 }
 
 
@@ -152,62 +137,22 @@ void initialize_grid(int N, int cuda_block_size) {
 }
 
 void update_simulation() {
-    // calls kernels, reduces grid, and checks if end of simulation ////////////////////////////////////////////////////////
-    // CUDA_CHECK(cudaGetLastError());
+    // calls kernels, reduces grid, and checks if end of simulation 
 
     // calculate the diffusion using shared GPU memory ////////////////////////////////////////////////////////
     simulate_diffusion<<<h_gridDim, h_blockDim, bytesShared>>>(grid, new_grid, grid_size, diffusion_rate);
     cudaDeviceSynchronize();
-    // CUDA_CHECK(cudaGetLastError());
-    // CUDA_CHECK(cudaDeviceSynchronize());
     swap(grid, new_grid);
-    // printf("(host) End of simulate_diffusion\n");
     
     // apply heat sources in global GPU memory ////////////////////////////////////////////////////////
     heat_sources<<<1, 1>>>(grid, grid_size);
-    // CUDA_CHECK(cudaGetLastError());
-    // CUDA_CHECK(cudaDeviceSynchronize());
-    // printf("(host) End of heat_sources\n");
 
     // reduce in device using kernel ////////////////////////////////////////////////////////
     size_t totalBlocks = (h_gridDim.x * h_gridDim.y); 
     cudaMemset(new_grid, 0, totalBlocks * sizeof(float)); // using new_grid as reduction vector 
-    // CUDA_CHECK(cudaGetLastError());
     
     size_t nohalo = sizeof(float) * h_blockDim.x * h_blockDim.y;
     reduce_grid<<<h_gridDim, h_blockDim, nohalo>>>(grid, new_grid, grid_size * grid_size);
-    // CUDA_CHECK(cudaGetLastError());
-    // CUDA_CHECK(cudaDeviceSynchronize());
-    
-    // reduce in host ////////////////////////////////////////////////////////
-    float * h_partial = (float *)calloc(totalBlocks, sizeof(float));
-    cudaMemcpy(h_partial, new_grid, totalBlocks * sizeof(float), cudaMemcpyDeviceToHost); 
-    
-    float tot = 0;
-    for (int i = 0; i < totalBlocks; i++) tot += h_partial[i]; 
-    
-    compare with host-reduced grid  ////////////////////////////////////////////////////////
-    printf("(host) debug grid\n"); 
-    float * h_grid = (float *)calloc(grid_size * grid_size, sizeof(float));
-    cudaMemcpy(h_grid, grid, grid_size * grid_size * sizeof(float), cudaMemcpyDeviceToHost); 
-    float sum = 0.0f;
-    for (int i = 0; i < grid_size; i++) {
-        for (int j = 0; j < grid_size; j++) {
-            sum += h_grid[i*grid_size + j]; 
-            // printf("%4.0f", h_grid[i*grid_size +j]);
-        }
-        // printf("\n");
-    }
-    // printf("/////////////////////////////\n"); 
-
-    printf("(host) Final update_simulation logs ////////////////////////////\n"); 
-    printf("(host) h_gridDim %d %d\n", h_gridDim.x, h_gridDim.y);
-    printf("(host) h_blockDim %d %d %d\n", h_blockDim.x, h_blockDim.y, h_blockDim.z);
-    printf("(host) threadsPerBlock = %d\n", h_blockDim.x * h_blockDim.y);
-    printf("(host) totalBlocks = %d\n", totalBlocks);
-    printf("(host) Total accumulated in host: %f\n", sum);
-    printf("(host) Total accumulated via reduce_grid() kernel: %f\n", tot);
-    printf("(host) //////////////////////////////////////////////////////////\n"); 
 }
 
 void destroy_grid() {
