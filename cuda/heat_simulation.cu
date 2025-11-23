@@ -27,9 +27,10 @@ int grid_size = 0;
 // general TO-DOs: 
 // [x] fix consistency for first single step (should total = 1000 but sometimes differs)
 // [x] compare against sequential solution
+// [x] clean code
+// [.] Use partial vector to reduce grid
 // [.] Add convergence verification to stop simulation
 // [.] check if graphics integration works ok
-// [x] clean code
 
 
 // Kernels (device) //////////////////////////////////////////////////
@@ -136,7 +137,7 @@ void initialize_grid(int N, int cuda_block_size) {
     CUDA_CHECK(cudaGetLastError());
 }
 
-void update_simulation() {
+bool update_simulation() {
     // calls kernels, reduces grid, and checks if end of simulation 
 
     // calculate the diffusion using shared GPU memory ////////////////////////////////////////////////////////
@@ -153,6 +154,8 @@ void update_simulation() {
     
     size_t nohalo = sizeof(float) * h_blockDim.x * h_blockDim.y;
     reduce_grid<<<h_gridDim, h_blockDim, nohalo>>>(grid, new_grid, grid_size * grid_size);
+    
+    return false; 
 }
 
 void destroy_grid() {

@@ -7,7 +7,7 @@
 #include <stdio.h>    // para printf
 
 void initialize_grid(int N, int cuda_block_size);
-void update_simulation();
+bool update_simulation();
 void destroy_grid();
 
 #endif

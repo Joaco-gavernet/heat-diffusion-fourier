@@ -167,10 +167,11 @@ int main(int argc, char* argv[]) {
     
     int N = 32;
     int cuda_block_size = 16;
-    int max_steps = 100;
+    int max_steps = 1000;
     
     if (argc > 1) N = atoi(argv[1]);
     if (argc > 2) cuda_block_size = atoi(argv[2]);
+    if (argc > 3) max_steps = atoi(argv[2]);
 
     printf("(host) Parametros de simulacion: \n");
     printf("(host) N = %d\n", N);
@@ -184,7 +185,7 @@ int main(int argc, char* argv[]) {
     
     double timesim = dwalltime(); 
     for (int i = 0; i < max_steps; i++) {
-        update_simulation();
+        if (update_simulation()) break;
     }
     #ifdef GLUT
     (ms, timer, 0); // Llama a timer (el paso de simulacion) cada ms milisegundos - FPSs= 1000/ (milisegundos por frame)
