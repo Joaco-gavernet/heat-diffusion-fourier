@@ -171,7 +171,7 @@ int main(int argc, char* argv[]) {
     
     if (argc > 1) N = atoi(argv[1]);
     if (argc > 2) cuda_block_size = atoi(argv[2]);
-    if (argc > 3) max_steps = atoi(argv[2]);
+    if (argc > 3) max_steps = atoi(argv[3]);
 
     printf("(host) Parametros de simulacion: \n");
     printf("(host) N = %d\n", N);
