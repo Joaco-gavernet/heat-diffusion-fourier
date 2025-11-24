@@ -69,7 +69,7 @@ __global__ void grid_diffusion(float * grid, float * new_grid, int grid_size, fl
         return;
     }
     
-    // 1) Acceder coalescentemente a la memmoria global trayendo datos a memoria compartida
+    // Acceder coalescentemente a la memoria global, trayendo datos a memoria compartida
     const int strideY = blockDim.x + 2;
     const int localX = threadIdx.x + 1;
     const int localY = threadIdx.y + 1;
@@ -82,7 +82,7 @@ __global__ void grid_diffusion(float * grid, float * new_grid, int grid_size, fl
 
     __syncthreads();
     
-    // 2) Procesamiento sobre memoria compartida
+    // Procesamiento sobre memoria compartida
     float center = d_shared_grid[localY * strideY + localX];
 
     float up = d_shared_grid[(localY - 1) * strideY + localX];
@@ -93,7 +93,7 @@ __global__ void grid_diffusion(float * grid, float * new_grid, int grid_size, fl
     
     __syncthreads();
     
-    // 3) Acceder coalescentemente a la memoria global escribiendo resultados
+    // Acceder coalescentemente a la memoria global escribiendo resultados
     new_grid[y*grid_size + x] = d_shared_grid_new[localY *strideY + localX];
 }
 
